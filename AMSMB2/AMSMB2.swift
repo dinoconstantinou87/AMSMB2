@@ -946,9 +946,9 @@ public class SMB2Manager: NSObject, NSSecureCoding, Codable, NSCopying, CustomRe
             let size = try await Int64(file.fstat().smb2_size)
 
             var shouldContinue = true
-            try await file.seek(offset: offset, from: .start)
+            try file.seek(offset: offset, from: .start)
             while shouldContinue {
-                let offset = try await file.seek(offset: 0, from: .current)
+                let offset = try file.seek(offset: 0, from: .current)
                 let data = try await file.read()
                 if data.isEmpty {
                     break
@@ -996,7 +996,7 @@ public class SMB2Manager: NSObject, NSSecureCoding, Codable, NSCopying, CustomRe
             var offset = range.lowerBound
             do {
                 let file = try await SMB2FileHandle(forReadingAtPath: path, on: client)
-                try await file.seek(offset: range.lowerBound, from: .start)
+                try file.seek(offset: range.lowerBound, from: .start)
                 while offset < range.upperBound {
                     // Read optimal read size, or less if less is remaining.
                     let remainingLength = range.upperBound - offset
@@ -1694,7 +1694,7 @@ extension SMB2Manager {
         try await stream.withOpenStream {
             var shouldContinue = true
             var sent: Int64 = 0
-            try await file.seek(offset: range.lowerBound, from: .start)
+            try file.seek(offset: range.lowerBound, from: .start)
             while shouldContinue {
                 let prefCount = Int(min(Int64(file.optimizedReadSize), Int64(size - sent)))
                 guard prefCount > 0 else {
@@ -1725,7 +1725,7 @@ extension SMB2Manager {
         if let offset {
             try await client.resize(toPath, to: .init(offset))
             file = try await SMB2FileHandle(forOutputAtPath: toPath, on: client)
-            try await file.seek(offset: offset, from: .start)
+            try file.seek(offset: offset, from: .start)
         } else {
             file = try await SMB2FileHandle(forCreatingIfNotExistsAtPath: toPath, on: client)
         }
@@ -1746,7 +1746,7 @@ extension SMB2Manager {
                 }
 
                 totalWritten += UInt64(segment.count)
-                var offset = try await file.seek(offset: 0, from: .current)
+                var offset = try file.seek(offset: 0, from: .current)
                 if offset > totalWritten {
                     offset = Int64(totalWritten)
                 }

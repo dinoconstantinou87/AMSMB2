@@ -1,6 +1,6 @@
 import Foundation
 
-final class ReplyBuffer: @unchecked Sendable {
+final class ReplyBuffer {
     let bytes: UnsafeMutablePointer<UInt8>
     let count: Int
 

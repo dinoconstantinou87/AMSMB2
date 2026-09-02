@@ -1,6 +1,6 @@
 import Foundation
 
-public final class SMB2File: @unchecked Sendable {
+public final class SMB2File: Sendable {
     private let handle: SMB2FileHandle
 
     init(handle: SMB2FileHandle) {
@@ -40,7 +40,7 @@ public final class SMB2File: @unchecked Sendable {
 }
 
 extension SMB2Manager {
-    open func openFile(atPath path: String) async throws -> SMB2File {
+    public func openFile(atPath path: String) async throws -> SMB2File {
         let client = try client.unwrap()
         return try await SMB2File(handle: SMB2FileHandle(forReadingAtPath: path, on: client))
     }

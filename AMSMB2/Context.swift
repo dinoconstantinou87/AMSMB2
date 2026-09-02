@@ -29,7 +29,7 @@ final class SMB2Client: CustomDebugStringConvertible, CustomReflectable, @unchec
 
     var isServicing = false
 
-    private(set) var peakCommandsInFlight = 0
+    private var highestCommandsInFlight = 0
     
     init() throws {
         self.context = try smb2_init_context().unwrap()
@@ -41,6 +41,12 @@ final class SMB2Client: CustomDebugStringConvertible, CustomReflectable, @unchec
             self.context = nil
             smb2_destroy_context(context)
         }
+    }
+
+    func withLock<R>(_ body: () -> R) -> R {
+        _context_lock.lock()
+        defer { _context_lock.unlock() }
+        return body()
     }
 
     func withThreadSafeContext<R>(_ handler: (UnsafeMutablePointer<smb2_context>) throws -> R)
@@ -400,24 +406,55 @@ extension SMB2Client {
 // MARK: Async operation handler
 
 extension SMB2Client {
-    final class ResultBox<Value>: @unchecked Sendable {
-        var value: Value?
-        var error: (any Error)?
+    final class ResultBox<Value> {
+        private let lock = NSLock()
+        private var value: Value?
+        private var error: (any Error)?
+
+        func store(_ value: Value) {
+            lock.lock()
+            defer { lock.unlock() }
+            self.value = value
+        }
+
+        func store(error: any Error) {
+            lock.lock()
+            defer { lock.unlock() }
+            self.error = error
+        }
+
+        func take() throws -> Value {
+            lock.lock()
+            defer { lock.unlock() }
+            if let error { throw error }
+            return try value.unwrap()
+        }
     }
 
-    final class CBData: @unchecked Sendable {
+    final class CBData {
         private let lock = NSLock()
         private var continuation: CheckedContinuation<Void, Never>?
         private var finished = false
 
-        var result: Int32 = .init(NTStatus.success.rawValue)
-        var failure: (any Error)?
+        private var result: Int32 = .init(NTStatus.success.rawValue)
+        private var failure: (any Error)?
         var dataHandler: ((UnsafeMutableRawPointer?) -> Void)?
 
         private let deadline: Date?
 
-        var status: NTStatus {
-            NTStatus(rawValue: result)
+        func outcome() throws -> Int32 {
+            lock.lock()
+            let result = result
+            let failure = failure
+            lock.unlock()
+            if let failure { throw failure }
+            return result
+        }
+
+        func record(result: Int32) {
+            lock.lock()
+            defer { lock.unlock() }
+            self.result = result
         }
 
         var hasExpired: Bool {
@@ -463,7 +500,7 @@ extension SMB2Client {
         guard let cbdata else { return }
         let cb = Unmanaged<CBData>.fromOpaque(cbdata).takeRetainedValue()
         if NTStatus(rawValue: status) != .success {
-            cb.result = status
+            cb.record(result: status)
         }
         cb.dataHandler?(command_data)
         cb.finish()
@@ -493,10 +530,9 @@ extension SMB2Client {
             let result = try handler(context, cbPtr)
             try POSIXError.throwIfError(result, description: errorString)
         }
-        try await settle(cb)
-        try POSIXError.throwIfError(cb.result, description: errorString)
-        if let error = box.error { throw error }
-        return try (cb.result, box.value.unwrap())
+        let result = try await settle(cb)
+        try POSIXError.throwIfError(result, description: errorString)
+        return try (result, box.take())
     }
 
     @discardableResult
@@ -519,10 +555,9 @@ extension SMB2Client {
             let pdu = try handler(context, cbPtr).unwrap()
             smb2_queue_pdu(context, pdu)
         }
-        try await settle(cb)
-        try cb.status.throwIfError()
-        if let error = box.error { throw error }
-        return try (UInt32(bitPattern: cb.result), box.value.unwrap())
+        let result = try await settle(cb)
+        try NTStatus(rawValue: result).throwIfError()
+        return try (UInt32(bitPattern: result), box.take())
     }
 
     private func makeCallbackData<DataType>(
@@ -532,11 +567,12 @@ extension SMB2Client {
         -> CBData
     {
         let cb = CBData(timeout: timeout)
-        cb.dataHandler = { [unowned self] pointer in
+        cb.dataHandler = { [weak self] pointer in
+            guard let self else { return }
             do {
-                box.value = try dataHandler(self, pointer)
+                box.store(try dataHandler(self, pointer))
             } catch {
-                box.error = error
+                box.store(error: error)
             }
         }
         return cb
@@ -551,7 +587,7 @@ extension SMB2Client {
             try withThreadSafeContext { context in
                 try send(context, cbPtr)
                 pendingCommands.append(cb)
-                peakCommandsInFlight = Swift.max(peakCommandsInFlight, pendingCommands.count)
+                highestCommandsInFlight = Swift.max(highestCommandsInFlight, pendingCommands.count)
             }
         } catch {
             Unmanaged<CBData>.fromOpaque(cbPtr).release()
@@ -560,10 +596,10 @@ extension SMB2Client {
         startServicing()
     }
 
-    private func settle(_ cb: CBData) async throws {
+    private func settle(_ cb: CBData) async throws -> Int32 {
         await cb.wait()
         forgetPendingCommand(cb)
-        if let failure = cb.failure { throw failure }
+        return try cb.outcome()
     }
 
     private func forgetPendingCommand(_ cb: CBData) {
@@ -592,7 +628,17 @@ extension SMB2Client {
     private func serviceOnce() -> Bool {
         var pollDescriptor = pollfd()
         _context_lock.lock()
-        guard let context, !pendingCommands.isEmpty else {
+        guard let context else {
+            isServicing = false
+            let abandoned = pendingCommands
+            pendingCommands.removeAll()
+            _context_lock.unlock()
+            for cb in abandoned {
+                cb.finish(failure: POSIXError(.socketNotConnected, description: nil))
+            }
+            return false
+        }
+        guard !pendingCommands.isEmpty else {
             isServicing = false
             _context_lock.unlock()
             return false
@@ -624,6 +670,12 @@ extension SMB2Client {
             cb.finish(failure: POSIXError(.timedOut, description: nil))
         }
         return true
+    }
+
+    var peakCommandsInFlight: Int {
+        _context_lock.lock()
+        defer { _context_lock.unlock() }
+        return highestCommandsInFlight
     }
 
     var hasNoOutstandingCommands: Bool {

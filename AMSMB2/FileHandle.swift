@@ -18,14 +18,6 @@ import SystemPackage
 
 typealias smb2fh = OpaquePointer
 
-struct UncheckedHandle: @unchecked Sendable {
-    let value: smb2fh
-
-    init(_ value: smb2fh) {
-        self.value = value
-    }
-}
-
 @inlinable
 var _O_SYNC: CInt { O_SYNC }
 
@@ -189,9 +181,8 @@ final class SMB2FileHandle: @unchecked Sendable {
     deinit {
         guard let handle else { return }
         let client = client
-        let pointer = UncheckedHandle(handle)
         Task.detached(priority: .utility) {
-            try? await client.close(pointer.value)
+            try? await client.close(handle)
         }
     }
 
@@ -200,14 +191,20 @@ final class SMB2FileHandle: @unchecked Sendable {
     }
 
     func closeAsync() async throws {
-        guard let handle else { return }
-        self.handle = nil
+        guard let handle = takeHandle() else { return }
         try await client.close(handle)
     }
 
+    private func takeHandle() -> smb2fh? {
+        client.withLock {
+            let handle = self.handle
+            self.handle = nil
+            return handle
+        }
+    }
+
     func close() throws {
-        guard let handle = handle else { return }
-        self.handle = nil
+        guard let handle = takeHandle() else { return }
         _ = try client.withThreadSafeContext { context in
             smb2_close(context, handle)
         }
