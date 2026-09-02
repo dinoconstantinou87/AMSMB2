@@ -70,7 +70,7 @@ extension FileDescriptor.OpenOptions {
 }
 
 final class SMB2FileHandle: @unchecked Sendable {
-    private var client: SMB2Client
+    private let client: SMB2Client
     private var handle: smb2fh?
 
     convenience init(forReadingAtPath path: String, on client: SMB2Client) async throws {
@@ -211,7 +211,6 @@ final class SMB2FileHandle: @unchecked Sendable {
     }
 
     func fstat() async throws -> smb2_stat_64 {
-        let handle = try handle.unwrap()
         let st = UnsafeMutablePointer<smb2_stat_64>.allocate(capacity: 1)
         st.initialize(to: smb2_stat_64())
         defer {
@@ -219,7 +218,7 @@ final class SMB2FileHandle: @unchecked Sendable {
             st.deallocate()
         }
         try await client.async_await { context, cbPtr -> Int32 in
-            smb2_fstat_async(context, handle, st, SMB2Client.generic_handler, cbPtr)
+            smb2_fstat_async(context, try self.handle.unwrap(), st, SMB2Client.generic_handler, cbPtr)
         }
         return st.pointee
     }
@@ -263,9 +262,10 @@ final class SMB2FileHandle: @unchecked Sendable {
     }
 
     func resize(to newSize: UInt64) async throws {
-        let handle = try handle.unwrap()
         try await client.async_await { context, cbPtr -> Int32 in
-            smb2_ftruncate_async(context, handle, newSize, SMB2Client.generic_handler, cbPtr)
+            smb2_ftruncate_async(
+                context, try self.handle.unwrap(), newSize, SMB2Client.generic_handler, cbPtr
+            )
         }
     }
 
@@ -280,8 +280,9 @@ final class SMB2FileHandle: @unchecked Sendable {
 
     @discardableResult
     func seek(offset: Int64, from whence: FileDescriptor.SeekOrigin) throws -> Int64 {
-        let handle = try handle.unwrap()
-        let result = smb2_lseek(client.context, handle, offset, whence.rawValue, nil)
+        let result = try client.withThreadSafeContext { context in
+            smb2_lseek(context, try self.handle.unwrap(), offset, whence.rawValue, nil)
+        }
         try POSIXError.throwIfError(result, description: client.errorString)
         return result
     }
@@ -291,12 +292,12 @@ final class SMB2FileHandle: @unchecked Sendable {
             length <= UInt32.max, "Length bigger than UInt32.max can't be handled by libsmb2."
         )
 
-        let handle = try handle.unwrap()
         let count = length > 0 ? length : optimizedReadSize
         let buffer = ReplyBuffer(count: count)
         let result = try await client.async_await { context, cbPtr -> Int32 in
             smb2_read_async(
-                context, handle, buffer.bytes, .init(count), SMB2Client.generic_handler, cbPtr
+                context, try self.handle.unwrap(), buffer.bytes, .init(count),
+                SMB2Client.generic_handler, cbPtr
             )
         }
         return buffer.data(count: Int(result))
@@ -307,13 +308,12 @@ final class SMB2FileHandle: @unchecked Sendable {
             length <= UInt32.max, "Length bigger than UInt32.max can't be handled by libsmb2."
         )
 
-        let handle = try handle.unwrap()
         let count = length > 0 ? length : optimizedReadSize
         let buffer = ReplyBuffer(count: count)
         let result = try await client.async_await { context, cbPtr -> Int32 in
             smb2_pread_async(
-                context, handle, buffer.bytes, .init(count), offset, SMB2Client.generic_handler,
-                cbPtr
+                context, try self.handle.unwrap(), buffer.bytes, .init(count), offset,
+                SMB2Client.generic_handler, cbPtr
             )
         }
         return buffer.data(count: Int(result))
@@ -332,12 +332,12 @@ final class SMB2FileHandle: @unchecked Sendable {
             data.count <= Int32.max, "Data bigger than Int32.max can't be handled by libsmb2."
         )
 
-        let handle = try handle.unwrap()
         let buffer = ReplyBuffer(data)
         defer { withExtendedLifetime(buffer) {} }
         let result = try await client.async_await { context, cbPtr -> Int32 in
             smb2_write_async(
-                context, handle, buffer.bytes, .init(buffer.count), SMB2Client.generic_handler, cbPtr
+                context, try self.handle.unwrap(), buffer.bytes, .init(buffer.count),
+                SMB2Client.generic_handler, cbPtr
             )
         }
 
@@ -349,13 +349,12 @@ final class SMB2FileHandle: @unchecked Sendable {
             data.count <= Int32.max, "Data bigger than Int32.max can't be handled by libsmb2."
         )
 
-        let handle = try handle.unwrap()
         let buffer = ReplyBuffer(data)
         defer { withExtendedLifetime(buffer) {} }
         let result = try await client.async_await { context, cbPtr -> Int32 in
             smb2_pwrite_async(
-                context, handle, buffer.bytes, .init(buffer.count), offset, SMB2Client.generic_handler,
-                cbPtr
+                context, try self.handle.unwrap(), buffer.bytes, .init(buffer.count), offset,
+                SMB2Client.generic_handler, cbPtr
             )
         }
 
@@ -363,9 +362,8 @@ final class SMB2FileHandle: @unchecked Sendable {
     }
 
     func fsync() async throws {
-        let handle = try handle.unwrap()
         try await client.async_await { context, cbPtr -> Int32 in
-            smb2_fsync_async(context, handle, SMB2Client.generic_handler, cbPtr)
+            smb2_fsync_async(context, try self.handle.unwrap(), SMB2Client.generic_handler, cbPtr)
         }
     }
     
