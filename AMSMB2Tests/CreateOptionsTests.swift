@@ -25,14 +25,14 @@ import Glibc
 final class CreateOptionsTests: XCTestCase {
 
     func testO_SYNCAloneEmitsNoIntermediateBuffering() {
-        let opts = SMB2FileHandle.CreateOptions(flags: O_RDONLY | O_SYNC)
+        let opts = SMB2FileHandle.CreateOptions(options: .init(rawValue: O_RDONLY | O_SYNC))
         XCTAssertTrue(opts.contains(.noIntermediateBuffering),
                       "O_SYNC on a non-directory open should set .noIntermediateBuffering")
         XCTAssertFalse(opts.contains(.directoryFile))
     }
 
     func testO_DIRECTORYAloneSetsDirectoryFileWithoutBuffering() {
-        let opts = SMB2FileHandle.CreateOptions(flags: O_RDONLY | O_DIRECTORY)
+        let opts = SMB2FileHandle.CreateOptions(options: .init(rawValue: O_RDONLY | O_DIRECTORY))
         XCTAssertTrue(opts.contains(.directoryFile))
         XCTAssertFalse(opts.contains(.noIntermediateBuffering))
     }
@@ -42,7 +42,7 @@ final class CreateOptionsTests: XCTestCase {
         // and then OR in O_DIRECTORY after a stat result; the resulting
         // CreateOptions must NOT include .noIntermediateBuffering or
         // Windows will reject the CREATE.
-        let opts = SMB2FileHandle.CreateOptions(flags: O_RDONLY | O_SYNC | O_DIRECTORY)
+        let opts = SMB2FileHandle.CreateOptions(options: .init(rawValue: O_RDONLY | O_SYNC | O_DIRECTORY))
         XCTAssertTrue(opts.contains(.directoryFile),
                       "O_DIRECTORY should still set .directoryFile")
         XCTAssertFalse(opts.contains(.noIntermediateBuffering),
@@ -50,7 +50,7 @@ final class CreateOptionsTests: XCTestCase {
     }
 
     func testO_SYMLINKSetsOpenReparsePoint() {
-        let opts = SMB2FileHandle.CreateOptions(flags: O_RDONLY | O_SYMLINK)
+        let opts = SMB2FileHandle.CreateOptions(options: .init(rawValue: O_RDONLY | O_SYMLINK))
         XCTAssertTrue(opts.contains(.openReparsePoint))
         XCTAssertFalse(opts.contains(.directoryFile))
     }
