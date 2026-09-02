@@ -93,7 +93,7 @@ public class SMB2Manager: NSObject, NSSecureCoding, Codable, NSCopying, CustomRe
        - domain: User's domain, if applicable
        - credential: Username and password.
      */
-    public init?(url: URL, domain: String = "", credential: URLCredential?) {
+    public required init?(url: URL, domain: String = "", credential: URLCredential?) {
         guard url.scheme?.lowercased() == "smb", url.host != nil else {
             return nil
         }
