@@ -398,7 +398,7 @@ public class SMB2Manager: NSObject, NSSecureCoding, Codable, NSCopying, CustomRe
        - atPath: path of directory to be enumerated.
        - recursive: subdirectories will enumerated if `true`.
        - completionHandler: closure will be run after enumerating is completed.
-       - result: An array of `[URLResourceKey: Any]` which holds files' attributes. file name is stored in `.nameKey`.
+       - result: An array of `[URLResourceKey: any Sendable]` which holds files' attributes. file name is stored in `.nameKey`.
      */
     open func contentsOfDirectory(
         atPath path: String, recursive: Bool = false,
@@ -415,10 +415,10 @@ public class SMB2Manager: NSObject, NSSecureCoding, Codable, NSCopying, CustomRe
      - Parameters:
        - atPath: path of directory to be enumerated.
        - recursive: subdirectories will enumerated if `true`.
-     - Returns: An array of `[URLResourceKey: Any]` which holds files' attributes. file name is stored in `.nameKey`.
+     - Returns: An array of `[URLResourceKey: any Sendable]` which holds files' attributes. file name is stored in `.nameKey`.
      */
     open func contentsOfDirectory(atPath path: String, recursive: Bool = false) async throws
-        -> [[URLResourceKey: Any]]
+        -> [[URLResourceKey: any Sendable]]
     {
         try await withCheckedThrowingContinuation { continuation in
             contentsOfDirectory(
@@ -465,7 +465,7 @@ public class SMB2Manager: NSObject, NSSecureCoding, Codable, NSCopying, CustomRe
      - Returns: A dictionary object that describes the attributes of the mounted file system on which path resides.
            See _File-System Attribute Keys_ for a description of the keys available in the dictionary.
      */
-    open func attributesOfFileSystem(forPath path: String) async throws -> [FileAttributeKey: Any] {
+    open func attributesOfFileSystem(forPath path: String) async throws -> [FileAttributeKey: any Sendable] {
         try await withCheckedThrowingContinuation { continuation in
             attributesOfFileSystem(forPath: path, completionHandler: asyncHandler(continuation))
         }
