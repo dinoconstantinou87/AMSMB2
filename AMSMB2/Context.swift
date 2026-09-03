@@ -230,6 +230,15 @@ extension SMB2Client {
         smb2_get_error(context).map(String.init(cString:))
     }
     
+    func throwIfError(_ result: Int32, status: NTStatus? = nil, message: String? = nil) throws {
+        guard result < 0 else { return }
+        let errno = Errno(rawValue: -result)
+        let status = status ?? ntError
+        let recorded: NTStatus? = status.severity == .error && status.errno == errno ? status : nil
+        let description = (message ?? errorString).map { "Error code \(errno): \($0)" }
+        throw POSIXError(errno, description: description, ntStatus: recorded)
+    }
+    
     var ntError: NTStatus {
         .init(rawValue: smb2_get_nterror(context))
     }
@@ -438,6 +447,8 @@ extension SMB2Client {
 
         private var result: Int32 = .init(NTStatus.success.rawValue)
         private var failure: (any Error)?
+        private(set) var ntStatus: NTStatus?
+        private(set) var message: String?
         var dataHandler: ((UnsafeMutableRawPointer?) -> Void)?
 
         private let deadline: Date?
@@ -451,10 +462,12 @@ extension SMB2Client {
             return result
         }
 
-        func record(result: Int32) {
+        func record(result: Int32, from context: UnsafeMutablePointer<smb2_context>?) {
             lock.lock()
             defer { lock.unlock() }
             self.result = result
+            ntStatus = NTStatus(rawValue: smb2_get_nterror(context))
+            message = smb2_get_error(context).map(String.init(cString:))
         }
 
         var hasExpired: Bool {
@@ -496,11 +509,11 @@ extension SMB2Client {
         }
     }
 
-    static let generic_handler: smb2_command_cb = { _, status, command_data, cbdata in
+    static let generic_handler: smb2_command_cb = { context, status, command_data, cbdata in
         guard let cbdata else { return }
         let cb = Unmanaged<CBData>.fromOpaque(cbdata).takeRetainedValue()
         if NTStatus(rawValue: status) != .success {
-            cb.record(result: status)
+            cb.record(result: status, from: context)
         }
         cb.dataHandler?(command_data)
         cb.finish()
@@ -528,10 +541,10 @@ extension SMB2Client {
         let cb = makeCallbackData(dataHandler: dataHandler, into: box)
         try submit(cb) { context, cbPtr in
             let result = try handler(context, cbPtr)
-            try POSIXError.throwIfError(result, description: errorString)
+            try throwIfError(result)
         }
         let result = try await settle(cb)
-        try POSIXError.throwIfError(result, description: errorString)
+        try throwIfError(result, status: cb.ntStatus, message: cb.message)
         return try (result, box.take())
     }
 
@@ -795,7 +808,7 @@ struct ShareProperties: RawRepresentable {
     }
 }
 
-struct NTStatus: LocalizedError, Hashable, CustomStringConvertible, Sendable {
+public struct NTStatus: LocalizedError, Hashable, CustomStringConvertible, Sendable {
     enum Severity: UInt32, Hashable, CustomStringConvertible, Sendable {
         case success
         case info
@@ -827,9 +840,9 @@ struct NTStatus: LocalizedError, Hashable, CustomStringConvertible, Sendable {
         }
     }
     
-    let rawValue: UInt32
+    public let rawValue: UInt32
     
-    init(rawValue: UInt32) {
+    public init(rawValue: UInt32) {
         self.rawValue = rawValue
     }
     
@@ -837,11 +850,11 @@ struct NTStatus: LocalizedError, Hashable, CustomStringConvertible, Sendable {
         self.rawValue = .init(bitPattern: rawValue)
     }
     
-    var description: String {
+    public var description: String {
         "Error 0x\(String(rawValue, radix: 16, uppercase: true)): \(localizedDescription)"
     }
     
-    var errorDescription: String? {
+    public var errorDescription: String? {
         nterror_to_str(rawValue).map(String.init(cString:))
     }
     
@@ -855,9 +868,15 @@ struct NTStatus: LocalizedError, Hashable, CustomStringConvertible, Sendable {
     
     func throwIfError() throws {
         if severity == .error {
-            throw POSIXError(errno,description: description)
+            throw POSIXError(errno, description: description, ntStatus: self)
         }
     }
     
     static let success = Self(rawValue: SMB2_STATUS_SUCCESS)
+    
+    public static let logonFailure = Self(rawValue: SMB2_STATUS_LOGON_FAILURE)
+    
+    public static let accessDenied = Self(rawValue: SMB2_STATUS_ACCESS_DENIED)
+    
+    public static let badNetworkName = Self(rawValue: SMB2_STATUS_BAD_NETWORK_NAME)
 }
