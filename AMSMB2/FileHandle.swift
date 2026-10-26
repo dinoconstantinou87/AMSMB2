@@ -70,31 +70,31 @@ extension FileDescriptor.OpenOptions {
 }
 
 final class SMB2FileHandle: @unchecked Sendable {
-    private var client: SMB2Client
+    private let client: SMB2Client
     private var handle: smb2fh?
 
-    convenience init(forReadingAtPath path: String, on client: SMB2Client) throws {
-        try self.init(path, .readOnly, on: client)
+    convenience init(forReadingAtPath path: String, on client: SMB2Client) async throws {
+        try await self.init(path, .readOnly, on: client)
     }
 
-    convenience init(forWritingAtPath path: String, on client: SMB2Client) throws {
-        try self.init(path, .writeOnly, on: client)
+    convenience init(forWritingAtPath path: String, on client: SMB2Client) async throws {
+        try await self.init(path, .writeOnly, on: client)
     }
 
-    convenience init(forUpdatingAtPath path: String, on client: SMB2Client) throws {
-        try self.init(path, .readWrite, options: [.append] , on: client)
+    convenience init(forUpdatingAtPath path: String, on client: SMB2Client) async throws {
+        try await self.init(path, .readWrite, options: [.append], on: client)
     }
 
-    convenience init(forOverwritingAtPath path: String, on client: SMB2Client) throws {
-        try self.init(path, .writeOnly, options: [.truncate], on: client)
+    convenience init(forOverwritingAtPath path: String, on client: SMB2Client) async throws {
+        try await self.init(path, .writeOnly, options: [.truncate], on: client)
     }
 
-    convenience init(forOutputAtPath path: String, on client: SMB2Client) throws {
-        try self.init(path, .writeOnly, options: [.create], on: client)
+    convenience init(forOutputAtPath path: String, on client: SMB2Client) async throws {
+        try await self.init(path, .writeOnly, options: [.create], on: client)
     }
-    
-    convenience init(forCreatingIfNotExistsAtPath path: String, on client: SMB2Client) throws {
-        try self.init(path, .readWrite, options: [.create, .exclusiveCreate], on: client)
+
+    convenience init(forCreatingIfNotExistsAtPath path: String, on client: SMB2Client) async throws {
+        try await self.init(path, .readWrite, options: [.create, .exclusiveCreate], on: client)
     }
 
     convenience init(
@@ -106,27 +106,27 @@ final class SMB2FileHandle: @unchecked Sendable {
         shareAccess: ShareAccess = [.read, .write],
         createDisposition: CreateDisposition,
         createOptions: CreateOptions = [], on client: SMB2Client
-    ) throws {
+    ) async throws {
         var leaseData = opLock.leaseContext.map { Data($0.regions.joined()) } ?? .init()
         defer { withExtendedLifetime(leaseData) {} }
-        let (_, result) = try path.replacingOccurrences(of: "/", with: "\\").withCString { path in
-            try client.async_await_pdu(dataHandler: SMB2FileID.init) {
-                context, cbPtr -> UnsafeMutablePointer<smb2_pdu>? in
-                var req = smb2_create_request()
-                req.requested_oplock_level = opLock.lockLevel
-                req.impersonation_level = impersonation.rawValue
-                req.desired_access = desiredAccess.rawValue
-                req.file_attributes = fileAttributes.rawValue
-                req.share_access = shareAccess.rawValue
-                req.create_disposition = createDisposition.rawValue
-                req.create_options = createOptions.rawValue
-                req.name = path
-                leaseData.withUnsafeMutableBytes {
-                    req.create_context = $0.count > 0 ? $0.baseAddress?.assumingMemoryBound(to: UInt8.self) : nil
-                    req.create_context_length = UInt32($0.count)
-                }
-                return smb2_cmd_create_async(context, &req, SMB2Client.generic_handler, cbPtr)
+        let name = strdup(path.replacingOccurrences(of: "/", with: "\\"))
+        defer { free(name) }
+        let (_, result) = try await client.async_await_pdu(dataHandler: SMB2FileID.init) {
+            context, cbPtr -> UnsafeMutablePointer<smb2_pdu>? in
+            var req = smb2_create_request()
+            req.requested_oplock_level = opLock.lockLevel
+            req.impersonation_level = impersonation.rawValue
+            req.desired_access = desiredAccess.rawValue
+            req.file_attributes = fileAttributes.rawValue
+            req.share_access = shareAccess.rawValue
+            req.create_disposition = createDisposition.rawValue
+            req.create_options = createOptions.rawValue
+            req.name = UnsafePointer(name)
+            leaseData.withUnsafeMutableBytes {
+                req.create_context = $0.count > 0 ? $0.baseAddress?.assumingMemoryBound(to: UInt8.self) : nil
+                req.create_context_length = UInt32($0.count)
             }
+            return smb2_cmd_create_async(context, &req, SMB2Client.generic_handler, cbPtr)
         }
         try self.init(fileDescriptor: result.rawValue, on: client)
     }
@@ -136,8 +136,8 @@ final class SMB2FileHandle: @unchecked Sendable {
         options: FileDescriptor.OpenOptions = .init(),
         lock: OpLock = .none,
         on client: SMB2Client
-    ) throws {
-        try self.init(
+    ) async throws {
+        try await self.init(
             path: path,
             opLock: lock,
             desiredAccess: .init(mode, options: options),
@@ -160,8 +160,8 @@ final class SMB2FileHandle: @unchecked Sendable {
         options: FileDescriptor.OpenOptions = .init(),
         lock: OpLock = .none,
         on client: SMB2Client
-    ) throws {
-        let (_, handle) = try client.async_await(dataHandler: OpaquePointer.init) {
+    ) async throws {
+        let (_, handle) = try await client.async_await(dataHandler: OpaquePointer.init) {
             context, cbPtr -> Int32 in
             let flags = mode.rawValue | options.rawValue
             var leaseKey = lock.leaseContext.map { Data(value: $0.key) } ?? Data()
@@ -179,37 +179,52 @@ final class SMB2FileHandle: @unchecked Sendable {
     }
 
     deinit {
-        do {
-            let handle = try self.handle.unwrap()
-            try client.async_await { context, cbPtr -> Int32 in
-                smb2_close_async(context, handle, SMB2Client.generic_handler, cbPtr)
-            }
-        } catch {}
+        guard let handle else { return }
+        let client = client
+        Task.detached(priority: .utility) {
+            try? await client.close(handle)
+        }
     }
 
     var fileId: UUID {
         .init(uuid: (try? smb2_get_file_id(handle.unwrap()).unwrap().pointee) ?? compound_file_id)
     }
 
+    func closeAsync() async throws {
+        guard let handle = takeHandle() else { return }
+        try await client.close(handle)
+    }
+
+    private func takeHandle() -> smb2fh? {
+        client.withLock {
+            let handle = self.handle
+            self.handle = nil
+            return handle
+        }
+    }
+
     func close() throws {
-        guard let handle = handle else { return }
-        self.handle = nil
+        guard let handle = takeHandle() else { return }
         _ = try client.withThreadSafeContext { context in
             smb2_close(context, handle)
         }
     }
 
-    func fstat() throws -> smb2_stat_64 {
-        let handle = try handle.unwrap()
-        var st = smb2_stat_64()
-        try client.async_await { context, cbPtr -> Int32 in
-            smb2_fstat_async(context, handle, &st, SMB2Client.generic_handler, cbPtr)
+    func fstat() async throws -> smb2_stat_64 {
+        let st = UnsafeMutablePointer<smb2_stat_64>.allocate(capacity: 1)
+        st.initialize(to: smb2_stat_64())
+        defer {
+            st.deinitialize(count: 1)
+            st.deallocate()
         }
-        return st
+        try await client.async_await { context, cbPtr -> Int32 in
+            smb2_fstat_async(context, try self.handle.unwrap(), st, SMB2Client.generic_handler, cbPtr)
+        }
+        return st.pointee
     }
     
-    func setInfo<T>(_ value: T, type: InfoType = .file, infoClass: InfoClass) throws {
-        try client.async_await_pdu(dataHandler: EmptyReply.init) {
+    func setInfo<T>(_ value: T, type: InfoType = .file, infoClass: InfoClass) async throws {
+        try await client.async_await_pdu(dataHandler: EmptyReply.init) {
             context, cbPtr -> UnsafeMutablePointer<smb2_pdu>? in
             var value = value
             return withUnsafeMutablePointer(to: &value) { buf in
@@ -223,7 +238,7 @@ final class SMB2FileHandle: @unchecked Sendable {
         }
     }
     
-    func set(stat: smb2_stat_64, attributes: Attributes) throws {
+    func set(stat: smb2_stat_64, attributes: Attributes) async throws {
         let bfi = smb2_file_basic_info(
             creation_time: smb2_timeval(
                 tv_sec: .init(stat.smb2_btime),
@@ -243,13 +258,14 @@ final class SMB2FileHandle: @unchecked Sendable {
             ),
             file_attributes: attributes.rawValue
         )
-        try setInfo(bfi, infoClass: .basic)
+        try await setInfo(bfi, infoClass: .basic)
     }
 
-    func resize(to newSize: UInt64) throws {
-        let handle = try handle.unwrap()
-        try client.async_await { context, cbPtr -> Int32 in
-            smb2_ftruncate_async(context, handle, newSize, SMB2Client.generic_handler, cbPtr)
+    func resize(to newSize: UInt64) async throws {
+        try await client.async_await { context, cbPtr -> Int32 in
+            smb2_ftruncate_async(
+                context, try self.handle.unwrap(), newSize, SMB2Client.generic_handler, cbPtr
+            )
         }
     }
 
@@ -264,47 +280,43 @@ final class SMB2FileHandle: @unchecked Sendable {
 
     @discardableResult
     func seek(offset: Int64, from whence: FileDescriptor.SeekOrigin) throws -> Int64 {
-        let handle = try handle.unwrap()
-        let result = smb2_lseek(client.context, handle, offset, whence.rawValue, nil)
+        let result = try client.withThreadSafeContext { context in
+            smb2_lseek(context, try self.handle.unwrap(), offset, whence.rawValue, nil)
+        }
         try POSIXError.throwIfError(result, description: client.errorString)
         return result
     }
 
-    func read(length: Int = 0) throws -> Data {
+    func read(length: Int = 0) async throws -> Data {
         precondition(
             length <= UInt32.max, "Length bigger than UInt32.max can't be handled by libsmb2."
         )
 
-        let handle = try handle.unwrap()
         let count = length > 0 ? length : optimizedReadSize
-        var buffer = Data(repeating: 0, count: count)
-        let result = try buffer.withUnsafeMutableBytes { buffer in
-            try client.async_await { context, cbPtr -> Int32 in
-                smb2_read_async(
-                    context, handle, buffer.baseAddress, .init(buffer.count), SMB2Client.generic_handler, cbPtr
-                )
-            }
+        let buffer = ReplyBuffer(count: count)
+        let result = try await client.async_await { context, cbPtr -> Int32 in
+            smb2_read_async(
+                context, try self.handle.unwrap(), buffer.bytes, .init(count),
+                SMB2Client.generic_handler, cbPtr
+            )
         }
-        return Data(buffer.prefix(Int(result)))
+        return buffer.data(count: Int(result))
     }
 
-    func read(toAbsoluteOffset offset: UInt64, length: Int = 0) throws -> Data {
+    func read(toAbsoluteOffset offset: UInt64, length: Int = 0) async throws -> Data {
         precondition(
             length <= UInt32.max, "Length bigger than UInt32.max can't be handled by libsmb2."
         )
 
-        let handle = try handle.unwrap()
         let count = length > 0 ? length : optimizedReadSize
-        var buffer = Data(repeating: 0, count: count)
-        let result = try buffer.withUnsafeMutableBytes { buffer in
-            try client.async_await { context, cbPtr -> Int32 in
-                smb2_pread_async(
-                    context, handle, buffer.baseAddress, .init(buffer.count), offset, SMB2Client.generic_handler,
-                    cbPtr
-                )
-            }
+        let buffer = ReplyBuffer(count: count)
+        let result = try await client.async_await { context, cbPtr -> Int32 in
+            smb2_pread_async(
+                context, try self.handle.unwrap(), buffer.bytes, .init(count), offset,
+                SMB2Client.generic_handler, cbPtr
+            )
         }
-        return buffer.prefix(Int(result))
+        return buffer.data(count: Int(result))
     }
 
     var maxWriteSize: Int {
@@ -315,50 +327,48 @@ final class SMB2FileHandle: @unchecked Sendable {
         maxWriteSize
     }
 
-    func write<DataType: DataProtocol>(data: DataType) throws -> Int {
+    func write<DataType: DataProtocol>(data: DataType) async throws -> Int {
         precondition(
             data.count <= Int32.max, "Data bigger than Int32.max can't be handled by libsmb2."
         )
 
-        let handle = try handle.unwrap()
-        let result = try Data(data).withUnsafeBytes { buffer in
-            try client.async_await { context, cbPtr -> Int32 in
-                smb2_write_async(
-                    context, handle, buffer.baseAddress, .init(buffer.count), SMB2Client.generic_handler, cbPtr
-                )
-            }
+        let buffer = ReplyBuffer(data)
+        defer { withExtendedLifetime(buffer) {} }
+        let result = try await client.async_await { context, cbPtr -> Int32 in
+            smb2_write_async(
+                context, try self.handle.unwrap(), buffer.bytes, .init(buffer.count),
+                SMB2Client.generic_handler, cbPtr
+            )
         }
 
         return Int(result)
     }
 
-    func write<DataType: DataProtocol>(toAbsoluteOffset offset: UInt64, data: DataType) throws -> Int {
+    func write<DataType: DataProtocol>(toAbsoluteOffset offset: UInt64, data: DataType) async throws -> Int {
         precondition(
             data.count <= Int32.max, "Data bigger than Int32.max can't be handled by libsmb2."
         )
 
-        let handle = try handle.unwrap()
-        let result = try Data(data).withUnsafeBytes { buffer in
-            try client.async_await { context, cbPtr -> Int32 in
-                smb2_pwrite_async(
-                    context, handle, buffer.baseAddress, .init(buffer.count), offset, SMB2Client.generic_handler,
-                    cbPtr
-                )
-            }
+        let buffer = ReplyBuffer(data)
+        defer { withExtendedLifetime(buffer) {} }
+        let result = try await client.async_await { context, cbPtr -> Int32 in
+            smb2_pwrite_async(
+                context, try self.handle.unwrap(), buffer.bytes, .init(buffer.count), offset,
+                SMB2Client.generic_handler, cbPtr
+            )
         }
 
         return Int(result)
     }
 
-    func fsync() throws {
-        let handle = try handle.unwrap()
-        try client.async_await { context, cbPtr -> Int32 in
-            smb2_fsync_async(context, handle, SMB2Client.generic_handler, cbPtr)
+    func fsync() async throws {
+        try await client.async_await { context, cbPtr -> Int32 in
+            smb2_fsync_async(context, try self.handle.unwrap(), SMB2Client.generic_handler, cbPtr)
         }
     }
     
-    func flock(_ op: LockOperation) throws {
-        try client.async_await_pdu { context, dataPtr in
+    func flock(_ op: LockOperation) async throws {
+        try await client.async_await_pdu { context, dataPtr in
             var element = smb2_lock_element(
                 offset: 0,
                 length: 0,
@@ -378,8 +388,8 @@ final class SMB2FileHandle: @unchecked Sendable {
         }
     }
     
-    func changeNotify(for type: SMB2FileChangeType) throws -> [SMB2FileChangeInfo] {
-        let (_, result) = try client.async_await(dataHandler: [SMB2FileChangeInfo].init) { context, dataPtr in
+    func changeNotify(for type: SMB2FileChangeType) async throws -> [SMB2FileChangeInfo] {
+        let (_, result) = try await client.async_await(dataHandler: [SMB2FileChangeInfo].init) { context, dataPtr in
             smb2_notify_change_filehandle_async(
                 context, handle,
                 UInt16(type.contains([.recursive]) ? SMB2_CHANGE_NOTIFY_WATCH_TREE : 0),
@@ -395,29 +405,32 @@ final class SMB2FileHandle: @unchecked Sendable {
     @discardableResult
     func fcntl<DataType: DataProtocol, R: DecodableResponse>(
         command: IOCtl.Command, args: DataType = Data()
-    ) throws -> R {
-        defer { withExtendedLifetime(args) {} }
-        var inputBuffer = [UInt8](args)
-        return try inputBuffer.withUnsafeMutableBytes { buf in
-            var req = smb2_ioctl_request(
-                ctl_code: command.rawValue,
-                file_id: fileId.uuid,
-                input_offset: 0, input_count: .init(buf.count),
-                max_input_response: 0,
-                output_offset: 0, output_count: UInt32(client.maximumTransactionSize),
-                max_output_response: 65535,
-                flags: .init(SMB2_0_IOCTL_IS_FSCTL),
-                input: buf.baseAddress
-            )
-            return try client.async_await_pdu(dataHandler: R.init) {
-                context, cbPtr -> UnsafeMutablePointer<smb2_pdu>? in
-                smb2_cmd_ioctl_async(context, &req, SMB2Client.generic_handler, cbPtr)
-            }.data
+    ) async throws -> R {
+        let input = ReplyBuffer(args)
+        defer { withExtendedLifetime(input) {} }
+        let request = UnsafeMutablePointer<smb2_ioctl_request>.allocate(capacity: 1)
+        request.initialize(to: smb2_ioctl_request(
+            ctl_code: command.rawValue,
+            file_id: fileId.uuid,
+            input_offset: 0, input_count: .init(input.count),
+            max_input_response: 0,
+            output_offset: 0, output_count: UInt32(client.maximumTransactionSize),
+            max_output_response: 65535,
+            flags: .init(SMB2_0_IOCTL_IS_FSCTL),
+            input: .init(input.bytes)
+        ))
+        defer {
+            request.deinitialize(count: 1)
+            request.deallocate()
         }
+        return try await client.async_await_pdu(dataHandler: R.init) {
+            context, cbPtr -> UnsafeMutablePointer<smb2_pdu>? in
+            smb2_cmd_ioctl_async(context, request, SMB2Client.generic_handler, cbPtr)
+        }.data
     }
     
-    func fcntl<DataType: DataProtocol>(command: IOCtl.Command, args: DataType = Data()) throws {
-        let _: AnyDecodableResponse = try fcntl(command: command, args: args)
+    func fcntl<DataType: DataProtocol>(command: IOCtl.Command, args: DataType = Data()) async throws {
+        let _: AnyDecodableResponse = try await fcntl(command: command, args: args)
     }
 }
 

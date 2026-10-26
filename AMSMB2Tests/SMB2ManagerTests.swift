@@ -115,6 +115,20 @@ class SMB2ManagerTests: XCTestCase, @unchecked Sendable {
         try await smb.connectShare(name: share, encrypted: encrypted)
     }
 
+    func testWrongPasswordReportsLogonFailure() async throws {
+        let user = credential?.user ?? ""
+        let wrong = URLCredential(user: user, password: "not-\(credential?.password ?? "")", persistence: .forSession)
+        let smb = SMB2Manager(url: server, credential: wrong)!
+        do {
+            try await smb.connectShare(name: share, encrypted: encrypted)
+            XCTFail("Connecting with a wrong password must fail.")
+        } catch {
+            let error = error as? POSIXError
+            XCTAssertEqual(error?.code, .ECONNREFUSED)
+            XCTAssertEqual(error?.ntStatus, .logonFailure)
+        }
+    }
+
     func testShareEnum() async throws {
         let smb = SMB2Manager(url: server, credential: credential)!
 

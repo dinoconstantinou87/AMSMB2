@@ -63,9 +63,22 @@ extension POSIXError {
     }
     
     public init(_ code: Errno, description: String?) {
+        self.init(code, description: description, ntStatus: nil)
+    }
+    
+    public init(_ code: Errno, description: String?, ntStatus: NTStatus?) {
         let description = description ?? code.description
-        let userInfo: [String: Any] = [NSLocalizedDescriptionKey: description]
+        var userInfo: [String: Any] = [NSLocalizedDescriptionKey: description]
+        if let ntStatus {
+            userInfo[Self.ntStatusKey] = ntStatus.rawValue
+        }
         self = POSIXError(.init(code), userInfo: userInfo)
+    }
+    
+    public static let ntStatusKey = "AMSMB2NTStatus"
+    
+    public var ntStatus: NTStatus? {
+        (userInfo[Self.ntStatusKey] as? UInt32).map(NTStatus.init(rawValue:))
     }
 }
 

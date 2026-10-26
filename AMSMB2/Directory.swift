@@ -18,9 +18,9 @@ final class SMB2Directory: Collection {
     private let client: SMB2Client
     private var handle: smb2dirPointer
 
-    init(_ path: String, on client: SMB2Client) throws {
+    init(_ path: String, on client: SMB2Client) async throws {
         self.path = path
-        let (_, handle) = try client.async_await(dataHandler: OpaquePointer.init) { context, cbPtr -> Int32 in
+        let (_, handle) = try await client.async_await(dataHandler: OpaquePointer.init) { context, cbPtr -> Int32 in
             smb2_opendir_async(context, path, SMB2Client.generic_handler, cbPtr)
         }
         
