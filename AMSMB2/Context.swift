@@ -430,8 +430,8 @@ extension SMB2Client {
         }
     }
 
-    final class CBData {
-        private let lock = NSLock()
+    final class CBData: @unchecked Sendable {
+        private let lock = NSCondition()
         private let retained: [AnyObject]
         private var continuation: CheckedContinuation<Void, Never>?
         private var finished = false
@@ -484,6 +484,15 @@ extension SMB2Client {
             }
         }
 
+        @available(*, noasync)
+        func waitUntilFinished() {
+            lock.lock()
+            while !finished {
+                lock.wait()
+            }
+            lock.unlock()
+        }
+
         func finish(failure: (any Error)? = nil) {
             lock.lock()
             guard !finished else {
@@ -496,6 +505,7 @@ extension SMB2Client {
             }
             let continuation = self.continuation
             self.continuation = nil
+            lock.broadcast()
             lock.unlock()
             continuation?.resume()
         }
@@ -568,6 +578,28 @@ extension SMB2Client {
         let result = try await settle(cb)
         try NTStatus(rawValue: result).throwIfError()
         return try (UInt32(bitPattern: result), box.take())
+    }
+
+    @discardableResult
+    @available(*, noasync)
+    func blocking_await(
+        retaining retained: [AnyObject] = [],
+        cancellation: SMB2Cancellation,
+        since mark: Int,
+        execute handler: UnsafeContextHandler<Int32>
+    ) throws -> Int32 {
+        let cb = makeCallbackData(dataHandler: { _, _ in }, into: ResultBox<Void>(), retaining: retained)
+        guard cancellation.begin(cb, since: mark) else { throw CancellationError() }
+        defer { cancellation.end(cb) }
+        try submit(cb) { context, cbPtr in
+            let result = try handler(context, cbPtr)
+            try throwIfError(result)
+        }
+        cb.waitUntilFinished()
+        forgetPendingCommand(cb)
+        let result = try cb.outcome()
+        try throwIfError(result, status: cb.ntStatus, message: cb.message)
+        return result
     }
 
     private func makeCallbackData<DataType>(

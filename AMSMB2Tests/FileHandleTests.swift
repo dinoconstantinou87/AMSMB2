@@ -73,4 +73,74 @@ final class FileHandleTests: XCTestCase {
         XCTAssertEqual(overshoot.count, contents.count)
         try await file.close()
     }
+
+    func testBlockingReadMatchesContents() async throws {
+        let smb = try XCTUnwrap(SMB2Manager(url: server, credential: credential))
+        let path = "handle-blocking-\(UUID().uuidString).bin"
+        let contents = Data((0..<(1 << 20)).map { UInt8($0 % 251) })
+        addTeardownBlock {
+            try? await smb.removeFile(atPath: path)
+            try await smb.disconnectShare(gracefully: true)
+        }
+
+        try await smb.connectShare(name: share)
+        try await smb.write(data: contents, toPath: path, progress: nil)
+
+        let file = try await smb.openFile(atPath: path)
+        let whole = try await Self.blockingRead(file, range: 0..<UInt64(contents.count)).get()
+        XCTAssertEqual(whole, contents)
+        try await file.close()
+    }
+
+    func testCancelledBlockingReadLeavesTheHandleUsable() async throws {
+        let smb = try XCTUnwrap(SMB2Manager(url: server, credential: credential))
+        let path = "handle-cancel-\(UUID().uuidString).bin"
+        let contents = Data((0..<(1 << 24)).map { UInt8($0 % 251) })
+        addTeardownBlock {
+            try? await smb.removeFile(atPath: path)
+            try await smb.disconnectShare(gracefully: true)
+        }
+
+        try await smb.connectShare(name: share)
+        try await smb.write(data: contents, toPath: path, progress: nil)
+
+        let file = try await smb.openFile(atPath: path)
+        let client = try XCTUnwrap(smb.client)
+        let cancellation = SMB2Cancellation()
+        let cancelled = await withCheckedContinuation { continuation in
+            Thread {
+                continuation.resume(returning: Result {
+                    try file.read(range: 0..<UInt64(contents.count), cancellation: cancellation)
+                })
+            }.start()
+            Self.cancel(once: client, isBusy: cancellation.cancel)
+        }
+        XCTAssertThrowsError(try cancelled.get()) { error in
+            XCTAssertTrue(error is CancellationError)
+        }
+
+        let head = try await Self.blockingRead(file, range: 0..<(1 << 20)).get()
+        XCTAssertEqual(head, contents.prefix(1 << 20))
+        try await file.close()
+    }
+
+    private static func cancel(once client: SMB2Client, isBusy cancel: @escaping @Sendable () -> Void) {
+        Thread {
+            let deadline = Date().addingTimeInterval(5)
+            while client.hasNoOutstandingCommands, Date() < deadline {
+                usleep(50)
+            }
+            cancel()
+        }.start()
+    }
+
+    private static func blockingRead(_ file: SMB2File, range: Range<UInt64>) async -> Result<Data, any Error> {
+        await withCheckedContinuation { continuation in
+            Thread {
+                continuation.resume(returning: Result {
+                    try file.read(range: range, cancellation: SMB2Cancellation())
+                })
+            }.start()
+        }
+    }
 }

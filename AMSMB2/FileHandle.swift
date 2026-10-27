@@ -314,6 +314,26 @@ final class SMB2FileHandle: @unchecked Sendable {
         return buffer.data(count: Int(result))
     }
 
+    @available(*, noasync)
+    func read(
+        toAbsoluteOffset offset: UInt64, length: Int = 0, cancellation: SMB2Cancellation, since mark: Int
+    ) throws -> Data {
+        precondition(
+            length <= UInt32.max, "Length bigger than UInt32.max can't be handled by libsmb2."
+        )
+
+        let count = length > 0 ? length : optimizedReadSize
+        let buffer = ReplyBuffer(count: count)
+        let result = try client.blocking_await(retaining: [buffer], cancellation: cancellation, since: mark) {
+            context, cbPtr -> Int32 in
+            smb2_pread_async(
+                context, try self.handle.unwrap(), buffer.bytes, .init(count), offset,
+                SMB2Client.generic_handler, cbPtr
+            )
+        }
+        return buffer.data(count: Int(result))
+    }
+
     var maxWriteSize: Int {
         (try? Int(client.withThreadSafeContext(smb2_get_max_write_size))) ?? -1
     }

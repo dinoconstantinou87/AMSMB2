@@ -34,6 +34,25 @@ public final class SMB2File: Sendable {
         return contents
     }
 
+    @available(*, noasync, message: "Blocks until the server replies; call it from a thread outside Swift concurrency.")
+    public func read(range: Range<UInt64>, cancellation: SMB2Cancellation) throws -> Data {
+        guard !range.isEmpty else { return Data() }
+        let mark = cancellation.mark
+        let length = Int(range.upperBound - range.lowerBound)
+        var contents = Data()
+        contents.reserveCapacity(length)
+        var offset = range.lowerBound
+        while contents.count < length {
+            let remaining = length - contents.count
+            let chunk = optimalReadSize > 0 ? Swift.min(remaining, optimalReadSize) : remaining
+            let data = try handle.read(toAbsoluteOffset: offset, length: chunk, cancellation: cancellation, since: mark)
+            if data.isEmpty { break }
+            contents.append(data)
+            offset += UInt64(data.count)
+        }
+        return contents
+    }
+
     public func close() async throws {
         try await handle.closeAsync()
     }

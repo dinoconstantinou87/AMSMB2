@@ -10,12 +10,12 @@ extension [Platform] {
 let package = Package(
     name: "AMSMB2",
     platforms: [
-        .iOS(.v14),
-        .macOS(.v11),
-        .macCatalyst(.v14),
-        .tvOS(.v14),
-        .watchOS(.v7),
-        .visionOS(.v1),
+        .iOS(.v18),
+        .macOS(.v15),
+        .macCatalyst(.v18),
+        .tvOS(.v18),
+        .watchOS(.v11),
+        .visionOS(.v2),
     ],
     products: [
         .library(
