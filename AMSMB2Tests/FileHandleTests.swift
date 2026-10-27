@@ -124,6 +124,34 @@ final class FileHandleTests: XCTestCase {
         try await file.close()
     }
 
+    func testCancelledTaskStopsAnAsyncRead() async throws {
+        let smb = try XCTUnwrap(SMB2Manager(url: server, credential: credential))
+        let path = "handle-task-\(UUID().uuidString).bin"
+        let contents = Data((0..<(1 << 24)).map { UInt8($0 % 251) })
+        addTeardownBlock {
+            try? await smb.removeFile(atPath: path)
+            try await smb.disconnectShare(gracefully: true)
+        }
+
+        try await smb.connectShare(name: share)
+        try await smb.write(data: contents, toPath: path, progress: nil)
+
+        let file = try await smb.openFile(atPath: path)
+        let client = try XCTUnwrap(smb.client)
+        let reading = Task {
+            try await file.read(range: 0..<UInt64(contents.count))
+        }
+        Self.cancel(once: client, isBusy: reading.cancel)
+
+        await XCTAssertThrowsErrorAsync(try await reading.value) { error in
+            XCTAssertTrue(error is CancellationError)
+        }
+
+        let head = try await file.read(range: 0..<(1 << 20))
+        XCTAssertEqual(head, contents.prefix(1 << 20))
+        try await file.close()
+    }
+
     private static func cancel(once client: SMB2Client, isBusy cancel: @escaping @Sendable () -> Void) {
         Thread {
             let deadline = Date().addingTimeInterval(5)
@@ -142,5 +170,17 @@ final class FileHandleTests: XCTestCase {
                 })
             }.start()
         }
+    }
+}
+
+private func XCTAssertThrowsErrorAsync<T>(
+    _ expression: @autoclosure () async throws -> T,
+    _ handler: (any Error) -> Void
+) async {
+    do {
+        _ = try await expression()
+        XCTFail("Expected an error")
+    } catch {
+        handler(error)
     }
 }

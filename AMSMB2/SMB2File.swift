@@ -24,6 +24,7 @@ public final class SMB2File: Sendable {
         contents.reserveCapacity(length)
         var offset = range.lowerBound
         while contents.count < length {
+            try Task.checkCancellation()
             let remaining = length - contents.count
             let chunk = optimalReadSize > 0 ? Swift.min(remaining, optimalReadSize) : remaining
             let data = try await handle.read(toAbsoluteOffset: offset, length: chunk)

@@ -640,7 +640,11 @@ extension SMB2Client {
     }
 
     private func settle(_ cb: CBData) async throws -> Int32 {
-        await cb.wait()
+        await withTaskCancellationHandler {
+            await cb.wait()
+        } onCancel: {
+            cb.finish(failure: CancellationError())
+        }
         forgetPendingCommand(cb)
         return try cb.outcome()
     }
