@@ -326,29 +326,19 @@ extension SMB2Client {
 
 extension SMB2Client {
     func stat(_ path: String) async throws -> smb2_stat_64 {
-        let st = UnsafeMutablePointer<smb2_stat_64>.allocate(capacity: 1)
-        st.initialize(to: smb2_stat_64())
-        defer {
-            st.deinitialize(count: 1)
-            st.deallocate()
+        let st = ReplyValue(smb2_stat_64())
+        try await async_await(retaining: [st]) { context, cbPtr -> Int32 in
+            smb2_stat_async(context, path.trimmedPath, st.pointer, SMB2Client.generic_handler, cbPtr)
         }
-        try await async_await { context, cbPtr -> Int32 in
-            smb2_stat_async(context, path.trimmedPath, st, SMB2Client.generic_handler, cbPtr)
-        }
-        return st.pointee
+        return st.pointer.pointee
     }
 
     func statvfs(_ path: String) async throws -> smb2_statvfs {
-        let st = UnsafeMutablePointer<smb2_statvfs>.allocate(capacity: 1)
-        st.initialize(to: smb2_statvfs())
-        defer {
-            st.deinitialize(count: 1)
-            st.deallocate()
+        let st = ReplyValue(smb2_statvfs())
+        try await async_await(retaining: [st]) { context, cbPtr -> Int32 in
+            smb2_statvfs_async(context, path.trimmedPath, st.pointer, SMB2Client.generic_handler, cbPtr)
         }
-        try await async_await { context, cbPtr -> Int32 in
-            smb2_statvfs_async(context, path.trimmedPath, st, SMB2Client.generic_handler, cbPtr)
-        }
-        return st.pointee
+        return st.pointer.pointee
     }
 
     func readlink(_ path: String) async throws -> String {
@@ -442,6 +432,7 @@ extension SMB2Client {
 
     final class CBData {
         private let lock = NSLock()
+        private let retained: [AnyObject]
         private var continuation: CheckedContinuation<Void, Never>?
         private var finished = false
 
@@ -475,8 +466,9 @@ extension SMB2Client {
             return Date() >= deadline
         }
 
-        init(timeout: TimeInterval) {
+        init(timeout: TimeInterval, retaining retained: [AnyObject] = []) {
             deadline = timeout > 0 ? Date().addingTimeInterval(timeout) : nil
+            self.retained = retained
         }
 
         func wait() async {
@@ -526,19 +518,23 @@ extension SMB2Client {
     ) throws -> R
 
     @discardableResult
-    func async_await(execute handler: UnsafeContextHandler<Int32>) async throws -> Int32 {
-        try await async_await(dataHandler: { _, _ in }, execute: handler).result
+    func async_await(
+        retaining retained: [AnyObject] = [],
+        execute handler: UnsafeContextHandler<Int32>
+    ) async throws -> Int32 {
+        try await async_await(retaining: retained, dataHandler: { _, _ in }, execute: handler).result
     }
 
     @discardableResult
     func async_await<DataType>(
+        retaining retained: [AnyObject] = [],
         dataHandler: @escaping ContextHandler<DataType>,
         execute handler: UnsafeContextHandler<Int32>
     )
         async throws -> (result: Int32, data: DataType)
     {
         let box = ResultBox<DataType>()
-        let cb = makeCallbackData(dataHandler: dataHandler, into: box)
+        let cb = makeCallbackData(dataHandler: dataHandler, into: box, retaining: retained)
         try submit(cb) { context, cbPtr in
             let result = try handler(context, cbPtr)
             try throwIfError(result)
@@ -557,13 +553,14 @@ extension SMB2Client {
 
     @discardableResult
     func async_await_pdu<DataType>(
+        retaining retained: [AnyObject] = [],
         dataHandler: @escaping ContextHandler<DataType>,
         execute handler: UnsafeContextHandler<UnsafeMutablePointer<smb2_pdu>?>
     )
         async throws -> (status: UInt32, data: DataType)
     {
         let box = ResultBox<DataType>()
-        let cb = makeCallbackData(dataHandler: dataHandler, into: box)
+        let cb = makeCallbackData(dataHandler: dataHandler, into: box, retaining: retained)
         try submit(cb) { context, cbPtr in
             let pdu = try handler(context, cbPtr).unwrap()
             smb2_queue_pdu(context, pdu)
@@ -575,11 +572,12 @@ extension SMB2Client {
 
     private func makeCallbackData<DataType>(
         dataHandler: @escaping ContextHandler<DataType>,
-        into box: ResultBox<DataType>
+        into box: ResultBox<DataType>,
+        retaining retained: [AnyObject]
     )
         -> CBData
     {
-        let cb = CBData(timeout: timeout)
+        let cb = CBData(timeout: timeout, retaining: retained)
         cb.dataHandler = { [weak self] pointer in
             guard let self else { return }
             do {

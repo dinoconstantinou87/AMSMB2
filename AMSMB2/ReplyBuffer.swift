@@ -35,3 +35,17 @@ final class ReplyBuffer {
         Data(bytes: bytes, count: Swift.min(Swift.max(count, 0), self.count))
     }
 }
+
+final class ReplyValue<Value> {
+    let pointer: UnsafeMutablePointer<Value>
+
+    init(_ value: Value) {
+        pointer = .allocate(capacity: 1)
+        pointer.initialize(to: value)
+    }
+
+    deinit {
+        pointer.deinitialize(count: 1)
+        pointer.deallocate()
+    }
+}
